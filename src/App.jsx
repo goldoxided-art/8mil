@@ -1,420 +1,589 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { useState, useRef, useEffect, useCallback } from “react”;
+import { createClient } from “@supabase/supabase-js”;
 
-const SUPABASE_URL = "https://jjfnyajgyzngvmpnrhbu.supabase.co";
-const SUPABASE_KEY = "sb_publishable_hyUgnThgXkUiwNJ0VY1z_g_CbEUHSSf";
+const SUPABASE_URL = “https://jjfnyajgyzngvmpnrhbu.supabase.co”;
+const SUPABASE_KEY = “sb_publishable_hyUgnThgXkUiwNJ0VY1z_g_CbEUHSSf”;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const CANVAS_W = 1600;
 const CANVAS_H = 500;
 const TOTAL_PIXELS = 8000000;
-
-function getNormSel(s, e) {
-  if (!s || !e) return null;
-  return { x:Math.min(s.x,e.x), y:Math.min(s.y,e.y), w:Math.abs(e.x-s.x), h:Math.abs(e.y-s.y) };
-}
-
-function getAvailPx(blocks, sel) {
-  if (!sel) return 0;
-  let sold = 0;
-  blocks.forEach(b => {
-    const ox = Math.max(sel.x,b.x), oy = Math.max(sel.y,b.y);
-    const ow = Math.min(sel.x+sel.w,b.x+b.w)-ox;
-    const oh = Math.min(sel.y+sel.h,b.y+b.h)-oy;
-    if (ow>0&&oh>0) sold += ow*oh;
-  });
-  return Math.max(0,(sel.w*sel.h)-sold);
-}
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 40;
 
 export default function App() {
-  const [blocks, setBlocks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState('draw');
-  const [isSelecting, setIsSelecting] = useState(false);
-  const [startPos, setStartPos] = useState(null);
-  const [currentPos, setCurrentPos] = useState(null);
-  const [confirmedSel, setConfirmedSel] = useState(null);
-  const [hoverPos, setHoverPos] = useState(null);
-  const [uploadedImg, setUploadedImg] = useState(null);
-  const [imgPos, setImgPos] = useState(null);
-  const [isDraggingImg, setIsDraggingImg] = useState(false);
-  const [dragOffset, setDragOffset] = useState(null);
-  const [imgScale, setImgScale] = useState(1);
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ name:'', color:'#333333' });
-  const [toast, setToast] = useState('');
-  const [activeTab, setActiveTab] = useState('leaderboard');
-  const [drawPixels, setDrawPixels] = useState([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [drawColor, setDrawColor] = useState('#222222');
-  const canvasRef = useRef(null);
-  const animRef = useRef(null);
-  const fileRef = useRef(null);
+const [blocks, setBlocks] = useState([]);
+const [loading, setLoading] = useState(true);
+const [drawColor, setDrawColor] = useState(’#e63946’);
+const [drawnPixels, setDrawnPixels] = useState([]);
+const [history, setHistory] = useState([]);
+const [redoStack, setRedoStack] = useState([]);
+const [isDrawing, setIsDrawing] = useState(false);
+const [zoom, setZoom] = useState(1);
+const [pan, setPan] = useState({ x: 0, y: 0 });
+const [isPanning, setIsPanning] = useState(false);
+const [lastPan, setLastPan] = useState(null);
+const [showModal, setShowModal] = useState(false);
+const [form, setForm] = useState({ name: ‘’ });
+const [toast, setToast] = useState(’’);
+const [activeTab, setActiveTab] = useState(‘leaderboard’);
+const [mode, setMode] = useState(‘view’); // ‘view’ | ‘draw’
+const canvasRef = useRef(null);
+const animRef = useRef(null);
+const containerRef = useRef(null);
 
-  useEffect(() => {
-    loadPixels();
-    const channel = supabase
-      .channel('pixels')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
-        setBlocks(prev => [...prev, payload.new]);
-      })
-      .subscribe();
-    return () => supabase.removeChannel(channel);
-  }, []);
+useEffect(() => {
+loadPixels();
+const channel = supabase.channel(‘pixels’)
+.on(‘postgres_changes’, { event: ‘INSERT’, schema: ‘public’, table: ‘pixels’ }, payload => {
+setBlocks(prev => […prev, payload.new]);
+}).subscribe();
+return () => supabase.removeChannel(channel);
+}, []);
 
-  const loadPixels = async () => {
-    setLoading(true);
-    const { data } = await supabase.from('pixels').select('*');
-    if (data) setBlocks(data);
-    setLoading(false);
-  };
+const loadPixels = async () => {
+setLoading(true);
+const { data } = await supabase.from(‘pixels’).select(’*’);
+if (data) setBlocks(data);
+setLoading(false);
+};
 
-  const totalSold = blocks.reduce((s,b)=>s+b.w*b.h,0);
-  const pct = ((totalSold/TOTAL_PIXELS)*100).toFixed(3);
+const totalSold = blocks.reduce((s, b) => s + b.w * b.h, 0) + drawnPixels.length;
+const pct = ((totalSold / TOTAL_PIXELS) * 100).toFixed(3);
 
-  const leaderboard = Object.values(
-    blocks.reduce((acc,b)=>{
-      if(!acc[b.owner]) acc[b.owner]={name:b.owner,pixels:0};
-      acc[b.owner].pixels+=b.w*b.h; return acc;
-    },{})
-  ).sort((a,b)=>b.pixels-a.pixels);
+const leaderboard = Object.values(
+blocks.reduce((acc, b) => {
+if (!acc[b.owner]) acc[b.owner] = { name: b.owner, pixels: 0 };
+acc[b.owner].pixels += b.w * b.h; return acc;
+}, {})
+).sort((a, b) => b.pixels - a.pixels);
 
-  const getPos = useCallback((e)=>{
-    const c=canvasRef.current; if(!c) return {x:0,y:0};
-    const r=c.getBoundingClientRect();
-    const cx=e.touches?e.touches[0].clientX:e.clientX;
-    const cy=e.touches?e.touches[0].clientY:e.clientY;
-    return {
-      x:Math.max(0,Math.min(CANVAS_W-1,Math.floor((cx-r.left)*(CANVAS_W/r.width)))),
-      y:Math.max(0,Math.min(CANVAS_H-1,Math.floor((cy-r.top)*(CANVAS_H/r.height))))
-    };
-  },[]);
+// Convert screen coords to canvas coords
+const screenToCanvas = useCallback((screenX, screenY) => {
+const container = containerRef.current;
+if (!container) return { x: 0, y: 0 };
+const rect = container.getBoundingClientRect();
+const relX = screenX - rect.left;
+const relY = screenY - rect.top;
+return {
+x: Math.floor((relX - pan.x) / zoom),
+y: Math.floor((relY - pan.y) / zoom)
+};
+}, [pan, zoom]);
 
-  const draw = useCallback(()=>{
-    const c=canvasRef.current; if(!c) return;
-    const ctx=c.getContext('2d');
-    ctx.fillStyle='#f8f8f8'; ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
-    ctx.strokeStyle='rgba(0,0,0,0.04)'; ctx.lineWidth=0.5;
-    for(let x=0;x<=CANVAS_W;x+=10){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,CANVAS_H);ctx.stroke();}
-    for(let y=0;y<=CANVAS_H;y+=10){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(CANVAS_W,y);ctx.stroke();}
-    if(mode==='upload'&&uploadedImg&&imgPos){ctx.globalAlpha=0.95;ctx.drawImage(uploadedImg,imgPos.x,imgPos.y,imgPos.w,imgPos.h);ctx.globalAlpha=1;}
-    blocks.forEach(b=>{
-      ctx.fillStyle=b.color; ctx.fillRect(b.x,b.y,b.w,b.h);
-      if(b.w>60&&b.h>18){
-        ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.fillRect(b.x+2,b.y+b.h/2-8,b.w-4,16);
-        ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.font=`bold ${Math.min(10,b.h*0.2)}px sans-serif`;
-        ctx.textAlign='center'; ctx.textBaseline='middle';
-        ctx.fillText(b.owner.substring(0,14),b.x+b.w/2,b.y+b.h/2);
-      }
+const getClientPos = (e) => {
+if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+return { x: e.clientX, y: e.clientY };
+};
+
+const draw = useCallback(() => {
+const canvas = canvasRef.current;
+if (!canvas) return;
+const ctx = canvas.getContext(‘2d’);
+const W = canvas.width;
+const H = canvas.height;
+
+```
+ctx.clearRect(0, 0, W, H);
+ctx.save();
+ctx.translate(pan.x, pan.y);
+ctx.scale(zoom, zoom);
+
+// Billboard background
+ctx.fillStyle = '#f0ede8';
+ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+// Grid (only when zoomed in enough)
+if (zoom > 3) {
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+  ctx.lineWidth = 0.5 / zoom;
+  for (let x = 0; x <= CANVAS_W; x += 10) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_H); ctx.stroke();
+  }
+  for (let y = 0; y <= CANVAS_H; y += 10) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_W, y); ctx.stroke();
+  }
+}
+
+// Sold blocks
+blocks.forEach(b => {
+  ctx.fillStyle = b.color;
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+  if (zoom > 2 && b.w > 40 && b.h > 14) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(b.x + 1, b.y + b.h / 2 - 7, b.w - 2, 14);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.font = `bold ${Math.min(9, b.h * 0.2)}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.owner.substring(0, 12), b.x + b.w / 2, b.y + b.h / 2);
+  }
+});
+
+// Drawn pixels
+drawnPixels.forEach(p => {
+  ctx.fillStyle = p.color;
+  ctx.fillRect(p.x, p.y, 1, 1);
+});
+
+// Billboard border
+ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+ctx.lineWidth = 2 / zoom;
+ctx.strokeRect(0, 0, CANVAS_W, CANVAS_H);
+
+ctx.restore();
+
+// Billboard frame overlay (outside canvas)
+if (zoom <= 1.5) {
+  ctx.save();
+  const frameColor = '#1a1a2e';
+  const fx = pan.x - 20;
+  const fy = pan.y - 20;
+  const fw = CANVAS_W * zoom + 40;
+  const fh = CANVAS_H * zoom + 40;
+  ctx.strokeStyle = frameColor;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(fx, fy, fw, fh);
+
+  // Frame details - poles
+  const poleW = 12;
+  const poleH = 60;
+  ctx.fillStyle = frameColor;
+  ctx.fillRect(fx + fw * 0.3 - poleW / 2, fy + fh, poleW, poleH);
+  ctx.fillRect(fx + fw * 0.7 - poleW / 2, fy + fh, poleW, poleH);
+  ctx.restore();
+}
+```
+
+}, [blocks, drawnPixels, zoom, pan]);
+
+useEffect(() => {
+const canvas = canvasRef.current;
+if (!canvas) return;
+const container = containerRef.current;
+if (!container) return;
+canvas.width = container.clientWidth;
+canvas.height = container.clientHeight;
+}, []);
+
+useEffect(() => {
+const loop = () => { draw(); animRef.current = requestAnimationFrame(loop); };
+animRef.current = requestAnimationFrame(loop);
+return () => cancelAnimationFrame(animRef.current);
+}, [draw]);
+
+// Initial pan to center billboard
+useEffect(() => {
+const container = containerRef.current;
+if (!container) return;
+const cw = container.clientWidth;
+const ch = container.clientHeight;
+setPan({
+x: (cw - CANVAS_W * MIN_ZOOM) / 2,
+y: (ch - CANVAS_H * MIN_ZOOM) / 2
+});
+}, []);
+
+const handleWheel = useCallback((e) => {
+e.preventDefault();
+const { x: cx, y: cy } = getClientPos(e);
+const container = containerRef.current;
+const rect = container.getBoundingClientRect();
+const mouseX = cx - rect.left;
+const mouseY = cy - rect.top;
+const delta = e.deltaY > 0 ? 0.85 : 1.18;
+setZoom(prev => {
+const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev * delta));
+setPan(p => ({
+x: mouseX - (mouseX - p.x) * (newZoom / prev),
+y: mouseY - (mouseY - p.y) * (newZoom / prev)
+}));
+return newZoom;
+});
+}, []);
+
+useEffect(() => {
+const container = containerRef.current;
+if (!container) return;
+container.addEventListener(‘wheel’, handleWheel, { passive: false });
+return () => container.removeEventListener(‘wheel’, handleWheel);
+}, [handleWheel]);
+
+const onPointerDown = useCallback((e) => {
+e.preventDefault();
+const { x: cx, y: cy } = getClientPos(e);
+const pos = screenToCanvas(cx, cy);
+
+```
+if (mode === 'draw') {
+  if (pos.x >= 0 && pos.x < CANVAS_W && pos.y >= 0 && pos.y < CANVAS_H) {
+    setIsDrawing(true);
+    setDrawnPixels(prev => {
+      const key = `${pos.x},${pos.y}`;
+      if (prev.find(p => p.x === pos.x && p.y === pos.y)) return prev;
+      return [...prev, { x: pos.x, y: pos.y, color: drawColor }];
     });
-    if(mode==='draw'&&drawPixels.length>0){ctx.fillStyle=drawColor;drawPixels.forEach(p=>ctx.fillRect(p.x,p.y,2,2));}
-    const dragSel=getNormSel(startPos,currentPos);
-    if(dragSel&&dragSel.w>2&&dragSel.h>2&&mode!=='draw'){
-      ctx.strokeStyle='#111';ctx.lineWidth=1.5;ctx.setLineDash([5,3]);
-      ctx.strokeRect(dragSel.x,dragSel.y,dragSel.w,dragSel.h);ctx.setLineDash([]);
-      ctx.fillStyle='rgba(0,0,0,0.06)';ctx.fillRect(dragSel.x,dragSel.y,dragSel.w,dragSel.h);
-      const px=dragSel.w*dragSel.h;
-      const label=`${px.toLocaleString()} px = ฿${px.toLocaleString()}`;
-      ctx.font='bold 11px monospace';const tw=ctx.measureText(label).width;
-      let lx=dragSel.x+4,ly=dragSel.y-20;if(ly<4)ly=dragSel.y+6;if(lx+tw+12>CANVAS_W)lx=CANVAS_W-tw-16;
-      ctx.fillStyle='rgba(0,0,0,0.85)';ctx.fillRect(lx-4,ly-2,tw+12,17);
-      ctx.fillStyle='#fff';ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText(label,lx,ly);
-    }
-    if(confirmedSel&&mode!=='draw'){ctx.strokeStyle='#111';ctx.lineWidth=2;ctx.setLineDash([]);ctx.strokeRect(confirmedSel.x,confirmedSel.y,confirmedSel.w,confirmedSel.h);}
-    if(hoverPos&&!isSelecting&&!isDrawing){
-      ctx.strokeStyle='rgba(0,0,0,0.08)';ctx.lineWidth=0.5;ctx.setLineDash([]);
-      ctx.beginPath();ctx.moveTo(hoverPos.x,0);ctx.lineTo(hoverPos.x,CANVAS_H);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(0,hoverPos.y);ctx.lineTo(CANVAS_W,hoverPos.y);ctx.stroke();
-    }
-  },[blocks,startPos,currentPos,hoverPos,isSelecting,confirmedSel,uploadedImg,imgPos,mode,drawPixels,drawColor,isDrawing]);
+  }
+} else {
+  setIsPanning(true);
+  setLastPan({ x: cx, y: cy });
+}
+```
 
-  useEffect(()=>{
-    const loop=()=>{draw();animRef.current=requestAnimationFrame(loop);};
-    animRef.current=requestAnimationFrame(loop);
-    return()=>cancelAnimationFrame(animRef.current);
-  },[draw]);
+}, [mode, screenToCanvas, drawColor]);
 
-  const onDown=(e)=>{
-    e.preventDefault();const p=getPos(e);
-    if(mode==='draw'){setIsDrawing(true);setDrawPixels(prev=>[...prev,p]);return;}
-    if(mode==='upload'&&imgPos&&p.x>=imgPos.x&&p.x<=imgPos.x+imgPos.w&&p.y>=imgPos.y&&p.y<=imgPos.y+imgPos.h){
-      setIsDraggingImg(true);setDragOffset({dx:p.x-imgPos.x,dy:p.y-imgPos.y});return;
-    }
-    setIsSelecting(true);setStartPos(p);setCurrentPos(p);
-  };
+const onPointerMove = useCallback((e) => {
+e.preventDefault();
+const { x: cx, y: cy } = getClientPos(e);
 
-  const onMove=(e)=>{
-    e.preventDefault();const p=getPos(e);setHoverPos(p);
-    if(mode==='draw'&&isDrawing){setDrawPixels(prev=>[...prev,p]);return;}
-    if(isDraggingImg&&imgPos&&dragOffset){
-      setImgPos(prev=>({...prev,x:Math.max(0,Math.min(CANVAS_W-prev.w,p.x-dragOffset.dx)),y:Math.max(0,Math.min(CANVAS_H-prev.h,p.y-dragOffset.dy))}));return;
-    }
-    if(isSelecting)setCurrentPos(p);
-  };
+```
+if (mode === 'draw' && isDrawing) {
+  const pos = screenToCanvas(cx, cy);
+  if (pos.x >= 0 && pos.x < CANVAS_W && pos.y >= 0 && pos.y < CANVAS_H) {
+    setDrawnPixels(prev => {
+      if (prev.find(p => p.x === pos.x && p.y === pos.y)) return prev;
+      return [...prev, { x: pos.x, y: pos.y, color: drawColor }];
+    });
+  }
+} else if (isPanning && lastPan) {
+  const dx = cx - lastPan.x;
+  const dy = cy - lastPan.y;
+  setPan(p => ({ x: p.x + dx, y: p.y + dy }));
+  setLastPan({ x: cx, y: cy });
+}
+```
 
-  const onUp=(e)=>{
-    e.preventDefault();
-    if(mode==='draw'){setIsDrawing(false);return;}
-    if(isDraggingImg){setIsDraggingImg(false);setDragOffset(null);return;}
-    if(!isSelecting)return;
-    const p=getPos(e);const sel=getNormSel(startPos,p);
-    if(sel&&sel.w>=10&&sel.h>=10){
-      setConfirmedSel(sel);
-      if(mode==='upload'&&uploadedImg){
-        const aspect=uploadedImg.width/uploadedImg.height;const selAspect=sel.w/sel.h;
-        let w=sel.w,h=sel.h;if(aspect>selAspect){h=w/aspect;}else{w=h*aspect;}
-        setImgPos({x:sel.x+(sel.w-w)/2,y:sel.y+(sel.h-h)/2,w,h});setImgScale(1);
-      }
-    }
-    setIsSelecting(false);setStartPos(null);setCurrentPos(null);
-  };
+}, [mode, isDrawing, isPanning, lastPan, screenToCanvas, drawColor]);
 
-  const onLeave=()=>{
-    setHoverPos(null);
-    if(isSelecting){setIsSelecting(false);setStartPos(null);setCurrentPos(null);}
-    if(isDrawing)setIsDrawing(false);
-    if(isDraggingImg){setIsDraggingImg(false);setDragOffset(null);}
-  };
+const onPointerUp = useCallback(() => {
+if (isDrawing) {
+setHistory(prev => […prev, drawnPixels]);
+setRedoStack([]);
+}
+setIsDrawing(false);
+setIsPanning(false);
+setLastPan(null);
+}, [isDrawing, drawnPixels]);
 
-  const handleImageUpload=(e)=>{
-    const file=e.target.files[0];if(!file)return;
-    const img=new Image();
-    img.onload=()=>{
-      setUploadedImg(img);
-      const bx=200,by=150,bw=300,bh=180;
-      setConfirmedSel({x:bx,y:by,w:bw,h:bh});
-      const aspect=img.width/img.height;const sa=bw/bh;
-      let w=bw,h=bh;if(aspect>sa){h=w/aspect;}else{w=h*aspect;}
-      setImgPos({x:bx+(bw-w)/2,y:by+(bh-h)/2,w,h});setImgScale(1);
-    };
-    img.src=URL.createObjectURL(file);
-  };
+const handleUndo = () => {
+if (history.length === 0) return;
+const prev = history[history.length - 1];
+setRedoStack(r => […r, drawnPixels]);
+setDrawnPixels(prev);
+setHistory(h => h.slice(0, -1));
+};
 
-  const scaleImg=(delta)=>{
-    if(!imgPos||!uploadedImg)return;
-    const ns=Math.max(0.2,Math.min(5,imgScale+delta));
-    const aspect=uploadedImg.width/uploadedImg.height;
-    const bw=confirmedSel?confirmedSel.w:200,bh=confirmedSel?confirmedSel.h:150;
-    const sa=bw/bh;let bwf=bw,bhf=bh;
-    if(aspect>sa){bhf=bwf/aspect;}else{bwf=bhf*aspect;}
-    const nw=bwf*ns,nh=bhf*ns;
-    const cx=imgPos.x+imgPos.w/2,cy=imgPos.y+imgPos.h/2;
-    setImgPos({x:cx-nw/2,y:cy-nh/2,w:nw,h:nh});setImgScale(ns);
-  };
+const handleRedo = () => {
+if (redoStack.length === 0) return;
+const next = redoStack[redoStack.length - 1];
+setHistory(h => […h, drawnPixels]);
+setDrawnPixels(next);
+setRedoStack(r => r.slice(0, -1));
+};
 
-  const handleBuy=async()=>{
-    let nb=null;
-    if(mode==='draw'){
-      if(drawPixels.length===0)return;
-      const xs=drawPixels.map(p=>p.x),ys=drawPixels.map(p=>p.y);
-      const x=Math.min(...xs),y=Math.min(...ys);
-      nb={x,y,w:Math.max(Math.max(...xs)-x,1),h:Math.max(Math.max(...ys)-y,1),color:drawColor,owner:form.name||'นิรนาม'};
-    } else if(mode==='upload'&&imgPos){
-      nb={x:Math.round(imgPos.x),y:Math.round(imgPos.y),w:Math.round(imgPos.w),h:Math.round(imgPos.h),color:'#aaaaaa',owner:form.name||'นิรนาม'};
-    }
-    if(!nb)return;
-    const{error}=await supabase.from('pixels').insert([nb]);
-    if(error){setToast('เกิดข้อผิดพลาด กรุณาลองใหม่');setTimeout(()=>setToast(''),3000);return;}
-    setDrawPixels([]);setImgPos(null);setUploadedImg(null);setConfirmedSel(null);
-    setShowModal(false);setToast(`✓ "${form.name||'นิรนาม'}" ติดบิลบอร์ดแล้ว!`);
-    setForm({name:'',color:'#333333'});setTimeout(()=>setToast(''),4000);
-  };
+const handleClearAll = () => {
+setHistory(h => […h, drawnPixels]);
+setRedoStack([]);
+setDrawnPixels([]);
+};
 
-  const drawPx=drawPixels.length;
-  const upAvail=imgPos?getAvailPx(blocks,{x:Math.round(imgPos.x),y:Math.round(imgPos.y),w:Math.round(imgPos.w),h:Math.round(imgPos.h)}):0;
-  const pendingPrice=mode==='draw'?drawPx:upAvail;
-  const inp={width:'100%',padding:'11px 14px',background:'#f5f5f5',border:'1px solid #ddd',color:'#111',fontFamily:'inherit',fontSize:'14px',outline:'none'};
+const handleBuy = async () => {
+if (drawnPixels.length === 0) return;
+const xs = drawnPixels.map(p => p.x), ys = drawnPixels.map(p => p.y);
+const x = Math.min(…xs), y = Math.min(…ys);
+const w = Math.max(…xs) - x + 1, h = Math.max(…ys) - y + 1;
+const nb = { x, y, w, h, color: drawColor, owner: form.name || ‘นิรนาม’ };
+const { error } = await supabase.from(‘pixels’).insert([nb]);
+if (error) { setToast(‘เกิดข้อผิดพลาด’); setTimeout(() => setToast(’’), 3000); return; }
+setDrawnPixels([]); setHistory([]); setRedoStack([]);
+setShowModal(false);
+setMode(‘view’);
+setToast(`✓ "${form.name || 'นิรนาม'}" ติดบิลบอร์ดแล้ว!`);
+setForm({ name: ‘’ });
+setTimeout(() => setToast(’’), 4000);
+};
 
-  return(
-    <div style={{background:'#fff',minHeight:'100vh',color:'#111',fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Sarabun:wght@300;400;600;700&display=swap');
-        *{box-sizing:border-box;margin:0;padding:0;}
-        ::-webkit-scrollbar{width:3px;} ::-webkit-scrollbar-thumb{background:#ccc;}
-        button{cursor:pointer;transition:all 0.15s;} button:hover{opacity:0.75;}
-        @keyframes fadeUp{from{opacity:0;transform:translateY(6px) translateX(-50%)}to{opacity:1;transform:translateY(0) translateX(-50%)}}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-        @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-      `}</style>
+const pendingPrice = drawnPixels.length;
 
-      <header style={{padding:'16px 32px',display:'flex',alignItems:'center',justifyContent:'space-between',borderBottom:'1px solid #ebebeb',background:'#fff',position:'sticky',top:0,zIndex:100}}>
-        <div>
-          <div style={{fontSize:'15px',fontWeight:700,letterSpacing:'3px',color:'#111'}}>8MILBILLBOARD</div>
-          <div style={{fontSize:'10px',color:'#aaa',letterSpacing:'2px',marginTop:'2px',fontFamily:'Sarabun'}}>8,000,000 พิกเซล · ฿1/พิกเซล · กรุงเทพมหานคร</div>
+return (
+<div style={{ background: ‘#0a0a0a’, minHeight: ‘100vh’, color: ‘#fff’, fontFamily: “‘Inter’, system-ui, sans-serif”, overflow: ‘hidden’ }}>
+<style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=Sarabun:wght@300;400;600;700;800&display=swap'); * { box-sizing: border-box; margin: 0; padding: 0; } ::-webkit-scrollbar { width: 3px; } ::-webkit-scrollbar-thumb { background: #333; } button { cursor: pointer; transition: all 0.15s; } button:hover { opacity: 0.8; } @keyframes fadeUp { from{opacity:0;transform:translateY(6px) translateX(-50%)} to{opacity:1;transform:translateY(0) translateX(-50%)} } @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} } @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} } @keyframes fadeIn { from{opacity:0} to{opacity:1} }`}</style>
+
+```
+  {/* HEADER */}
+  <header style={{ padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(10,10,10,0.95)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(255,255,255,0.06)', position: 'sticky', top: 0, zIndex: 100 }}>
+    <div>
+      <div style={{ fontSize: '14px', fontWeight: 800, letterSpacing: '4px', color: '#fff' }}>8MILBILLBOARD</div>
+      <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.3)', letterSpacing: '2px', marginTop: '2px', fontFamily: 'Sarabun' }}>8 ล้านพิกเซล · ฿1/พิกเซล · บิลบอร์ดใหญ่ที่สุด ใจกลางกรุงเทพ</div>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+      <div style={{ textAlign: 'right' }}>
+        <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.3)', letterSpacing: '2px' }}>ยอดขายรวม</div>
+        <div style={{ fontSize: '18px', fontWeight: 700, color: '#fff' }}>฿{totalSold.toLocaleString()}</div>
+      </div>
+      {mode === 'view' ? (
+        <button onClick={() => setMode('draw')} style={{ padding: '10px 20px', background: '#fff', border: 'none', color: '#000', fontSize: '12px', fontWeight: 700, letterSpacing: '1px', fontFamily: 'Sarabun', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          ✏️ เริ่มวาด
+        </button>
+      ) : (
+        <button onClick={() => { setMode('view'); setDrawnPixels([]); }} style={{ padding: '10px 20px', background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', fontSize: '12px', fontWeight: 600, fontFamily: 'Sarabun' }}>
+          ยกเลิก
+        </button>
+      )}
+    </div>
+  </header>
+
+  {/* PROGRESS */}
+  <div style={{ height: '2px', background: 'rgba(255,255,255,0.05)' }}>
+    <div style={{ height: '100%', width: `${pct}%`, background: 'linear-gradient(90deg, #e63946, #ff6b6b)', minWidth: '2px', transition: 'width 0.8s' }} />
+  </div>
+
+  {/* BILLBOARD SECTION — HERO */}
+  <div style={{ position: 'relative', height: '70vh', overflow: 'hidden' }}>
+
+    {/* Bangkok background */}
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 0,
+      background: 'linear-gradient(180deg, #0d1b2a 0%, #1b2838 40%, #2d3a4a 70%, #1a1a2e 100%)',
+    }}>
+      {/* City silhouette */}
+      <svg viewBox="0 0 1440 400" preserveAspectRatio="xMidYMax meet" style={{ position: 'absolute', bottom: 0, width: '100%', opacity: 0.6 }}>
+        <path d="M0,400 L0,280 L30,280 L30,240 L50,240 L50,220 L70,220 L70,200 L90,200 L90,180 L110,180 L110,200 L130,200 L130,160 L140,160 L140,140 L150,140 L150,160 L160,160 L160,200 L180,200 L180,220 L200,220 L200,200 L220,200 L220,180 L240,180 L240,160 L260,160 L260,140 L270,140 L270,120 L280,120 L280,100 L290,100 L290,80 L300,80 L300,100 L310,100 L310,120 L320,120 L320,140 L330,140 L330,160 L350,160 L350,180 L370,180 L370,200 L390,200 L390,220 L410,220 L410,240 L430,240 L430,260 L450,260 L450,240 L470,240 L470,220 L490,220 L490,200 L510,200 L510,180 L520,180 L520,160 L530,160 L530,140 L540,140 L540,120 L550,120 L550,100 L560,100 L560,80 L570,80 L570,60 L580,60 L580,80 L590,80 L590,100 L600,100 L600,120 L610,120 L610,140 L620,140 L620,160 L640,160 L640,180 L660,180 L660,200 L680,200 L680,220 L700,220 L700,200 L720,200 L720,180 L740,180 L740,160 L760,160 L760,140 L770,140 L770,120 L780,120 L780,100 L790,100 L790,80 L800,80 L800,100 L810,100 L810,120 L820,120 L820,140 L830,140 L830,160 L850,160 L850,180 L870,180 L870,200 L890,200 L890,220 L910,220 L910,240 L930,240 L930,260 L950,260 L950,240 L970,240 L970,220 L990,220 L990,200 L1010,200 L1010,180 L1030,180 L1030,160 L1050,160 L1050,180 L1070,180 L1070,200 L1090,200 L1090,220 L1110,220 L1110,200 L1130,200 L1130,180 L1150,180 L1150,200 L1170,200 L1170,220 L1190,220 L1190,240 L1210,240 L1210,260 L1230,260 L1230,280 L1260,280 L1260,260 L1290,260 L1290,280 L1320,280 L1320,300 L1350,300 L1350,280 L1380,280 L1380,300 L1410,300 L1410,320 L1440,320 L1440,400 Z" fill="#1a1a2e"/>
+        <path d="M0,400 L0,320 L60,320 L60,300 L80,300 L80,280 L100,280 L100,260 L120,260 L120,280 L140,280 L140,300 L160,300 L160,320 L200,320 L200,300 L220,300 L220,280 L240,280 L240,300 L260,300 L260,320 L300,320 L300,300 L320,300 L320,280 L340,280 L340,300 L360,300 L360,320 L400,320 L400,300 L430,300 L430,280 L460,280 L460,300 L490,300 L490,320 L530,320 L530,300 L560,300 L560,280 L590,280 L590,300 L620,300 L620,320 L660,320 L660,300 L700,300 L700,280 L730,280 L730,300 L760,300 L760,320 L800,320 L800,300 L840,300 L840,280 L870,280 L870,300 L900,300 L900,320 L940,320 L940,300 L970,300 L970,280 L1000,280 L1000,300 L1030,300 L1030,320 L1070,320 L1070,300 L1100,300 L1100,280 L1130,280 L1130,300 L1160,300 L1160,320 L1200,320 L1200,300 L1240,300 L1240,320 L1280,320 L1280,300 L1320,300 L1320,320 L1360,320 L1360,340 L1400,340 L1400,320 L1440,320 L1440,400 Z" fill="#23233a"/>
+      </svg>
+      {/* Stars */}
+      {[...Array(40)].map((_, i) => (
+        <div key={i} style={{ position: 'absolute', width: '1px', height: '1px', background: '#fff', borderRadius: '50%', opacity: Math.random() * 0.6 + 0.2, top: `${Math.random() * 50}%`, left: `${Math.random() * 100}%` }} />
+      ))}
+    </div>
+
+    {/* Billboard container */}
+    <div ref={containerRef} style={{ position: 'absolute', inset: 0, zIndex: 1, touchAction: 'none', cursor: mode === 'draw' ? 'crosshair' : 'grab' }}
+      onMouseDown={onPointerDown} onMouseMove={onPointerMove} onMouseUp={onPointerUp} onMouseLeave={onPointerUp}
+      onTouchStart={onPointerDown} onTouchMove={onPointerMove} onTouchEnd={onPointerUp}>
+      <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
+    </div>
+
+    {/* Loading overlay */}
+    {loading && (
+      <div style={{ position: 'absolute', inset: 0, zIndex: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+        <div style={{ width: '32px', height: '32px', border: '3px solid rgba(255,255,255,0.2)', borderTop: '3px solid #fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+      </div>
+    )}
+
+    {/* Draw toolbar */}
+    {mode === 'draw' && (
+      <div style={{ position: 'absolute', bottom: '20px', left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(10,10,10,0.95)', backdropFilter: 'blur(10px)', padding: '10px 16px', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '40px', zIndex: 10 }}>
+        {/* Color */}
+        <input type="color" value={drawColor} onChange={e => setDrawColor(e.target.value)} style={{ width: '32px', height: '32px', border: '2px solid rgba(255,255,255,0.2)', background: 'none', cursor: 'pointer', padding: '2px', borderRadius: '50%' }} />
+        <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.1)' }} />
+        {/* Undo */}
+        <button onClick={handleUndo} disabled={history.length === 0} style={{ width: '36px', height: '36px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: history.length === 0 ? 'rgba(255,255,255,0.2)' : '#fff', fontSize: '14px', borderRadius: '8px' }} title="Undo">↩</button>
+        {/* Redo */}
+        <button onClick={handleRedo} disabled={redoStack.length === 0} style={{ width: '36px', height: '36px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: redoStack.length === 0 ? 'rgba(255,255,255,0.2)' : '#fff', fontSize: '14px', borderRadius: '8px' }} title="Redo">↪</button>
+        {/* Clear */}
+        <button onClick={handleClearAll} style={{ width: '36px', height: '36px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '14px', borderRadius: '8px' }} title="ลบทั้งหมด">🗑</button>
+        <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.1)' }} />
+        {/* Pixel count */}
+        <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', fontFamily: 'Sarabun', minWidth: '80px' }}>
+          {drawnPixels.length.toLocaleString()} px = <strong style={{ color: '#fff' }}>฿{drawnPixels.length.toLocaleString()}</strong>
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:'24px'}}>
-          <div style={{textAlign:'right'}}>
-            <div style={{fontSize:'10px',color:'#aaa',letterSpacing:'2px'}}>ยอดขายรวม</div>
-            <div style={{fontSize:'20px',fontWeight:700,color:'#111'}}>฿{totalSold.toLocaleString()}</div>
-          </div>
-          <button onClick={()=>setShowModal(true)} style={{padding:'11px 24px',background:'#111',border:'none',color:'#fff',fontSize:'13px',fontWeight:600,letterSpacing:'1px'}}>ซื้อพิกเซล</button>
-        </div>
-      </header>
+        {/* Buy button */}
+        <button onClick={() => { if (drawnPixels.length > 0) setShowModal(true); }} style={{ padding: '8px 18px', background: drawnPixels.length > 0 ? '#fff' : 'rgba(255,255,255,0.1)', border: 'none', color: drawnPixels.length > 0 ? '#000' : 'rgba(255,255,255,0.3)', fontSize: '12px', fontWeight: 700, fontFamily: 'Sarabun', borderRadius: '20px' }}>
+          ซื้อเลย →
+        </button>
+      </div>
+    )}
 
-      <div style={{height:'2px',background:'#f0f0f0'}}><div style={{height:'100%',width:`${pct}%`,background:'#111',minWidth:'2px',transition:'width 0.8s'}}/></div>
+    {/* Zoom hint */}
+    {mode === 'view' && !loading && (
+      <div style={{ position: 'absolute', bottom: '20px', left: '50%', transform: 'translateX(-50%)', fontSize: '11px', color: 'rgba(255,255,255,0.4)', letterSpacing: '2px', fontFamily: 'Sarabun', pointerEvents: 'none', zIndex: 5 }}>
+        scroll เพื่อซูม · ลากเพื่อเลื่อน
+      </div>
+    )}
 
-      <div style={{padding:'0',background:'#111',position:'relative'}}>
-        <div style={{position:'absolute',top:'12px',left:'16px',zIndex:10,display:'flex',alignItems:'center',gap:'8px'}}>
-          <div style={{width:'6px',height:'6px',borderRadius:'50%',background:'#fff',opacity:0.4,animation:'pulse 2s infinite'}}/>
-          <div style={{fontSize:'9px',color:'rgba(255,255,255,0.35)',letterSpacing:'3px'}}>LIVE · BANGKOK BILLBOARD</div>
-        </div>
-        <div style={{position:'absolute',top:'10px',right:'16px',zIndex:10,display:'flex',gap:'4px'}}>
-          {[{key:'draw',label:'🎨 วาด'},{key:'upload',label:'📁 อัปโหลด'}].map(m=>(
-            <button key={m.key} onClick={()=>setMode(m.key)} style={{padding:'6px 14px',background:mode===m.key?'rgba(255,255,255,0.95)':'rgba(255,255,255,0.1)',border:'none',color:mode===m.key?'#111':'rgba(255,255,255,0.6)',fontSize:'11px',fontWeight:600,fontFamily:'Sarabun'}}>{m.label}</button>
-          ))}
-        </div>
-        {loading&&(<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',zIndex:20,background:'rgba(0,0,0,0.5)'}}><div style={{width:'32px',height:'32px',border:'3px solid rgba(255,255,255,0.2)',borderTop:'3px solid #fff',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/></div>)}
-        <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} style={{display:'block',width:'100%',height:'auto',userSelect:'none',cursor:mode==='draw'?'crosshair':'default'}} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onLeave}/>
-        {mode==='draw'&&(<div style={{position:'absolute',bottom:'12px',left:'50%',transform:'translateX(-50%)',display:'flex',alignItems:'center',gap:'12px',background:'rgba(255,255,255,0.95)',padding:'10px 20px',border:'1px solid rgba(0,0,0,0.08)'}}>
-          <div style={{fontSize:'11px',color:'#555',fontFamily:'Sarabun'}}>สี</div>
-          <input type="color" value={drawColor} onChange={e=>setDrawColor(e.target.value)} style={{width:'32px',height:'32px',border:'1px solid #ddd',padding:'2px',cursor:'pointer',background:'none'}}/>
-          <div style={{width:'1px',height:'24px',background:'#eee'}}/>
-          <div style={{fontSize:'11px',color:'#555',fontFamily:'Sarabun'}}>{drawPx.toLocaleString()} px = <strong>฿{drawPx.toLocaleString()}</strong></div>
-          <button onClick={()=>setDrawPixels([])} style={{fontSize:'11px',color:'#999',background:'none',border:'none',fontFamily:'Sarabun'}}>ลบ</button>
-          <button onClick={()=>{if(drawPx>0)setShowModal(true);}} style={{padding:'7px 18px',background:'#111',border:'none',color:'#fff',fontSize:'11px',fontWeight:600,fontFamily:'Sarabun'}}>ซื้อ ฿{drawPx.toLocaleString()} →</button>
-        </div>)}
-        {mode==='upload'&&(<div style={{position:'absolute',bottom:'12px',left:'50%',transform:'translateX(-50%)',display:'flex',alignItems:'center',gap:'12px',background:'rgba(255,255,255,0.95)',padding:'10px 20px',border:'1px solid rgba(0,0,0,0.08)'}}>
-          {!uploadedImg?(<><div style={{fontSize:'11px',color:'#555',fontFamily:'Sarabun'}}>เลือกพื้นที่แล้วอัปโหลดโลโก้</div><button onClick={()=>fileRef.current?.click()} style={{padding:'7px 18px',background:'#111',border:'none',color:'#fff',fontSize:'11px',fontWeight:600,fontFamily:'Sarabun'}}>อัปโหลดโลโก้</button><input ref={fileRef} type="file" accept="image/*" style={{display:'none'}} onChange={handleImageUpload}/></>
-          ):(<>
-            <div style={{fontSize:'11px',color:'#555',fontFamily:'Sarabun'}}>ขนาด</div>
-            <button onClick={()=>scaleImg(-0.1)} style={{width:'30px',height:'30px',background:'#f5f5f5',border:'1px solid #ddd',fontSize:'16px',color:'#333'}}>−</button>
-            <div style={{fontSize:'11px',fontWeight:600,minWidth:'36px',textAlign:'center'}}>{Math.round(imgScale*100)}%</div>
-            <button onClick={()=>scaleImg(0.1)} style={{width:'30px',height:'30px',background:'#f5f5f5',border:'1px solid #ddd',fontSize:'16px',color:'#333'}}>+</button>
-            <div style={{width:'1px',height:'24px',background:'#eee'}}/>
-            <div style={{fontSize:'11px',color:'#555',fontFamily:'Sarabun'}}>{upAvail.toLocaleString()} px = <strong>฿{upAvail.toLocaleString()}</strong></div>
-            <button onClick={()=>{setUploadedImg(null);setImgPos(null);setConfirmedSel(null);}} style={{fontSize:'11px',color:'#999',background:'none',border:'none',fontFamily:'Sarabun'}}>ลบ</button>
-            <button onClick={()=>{if(upAvail>0)setShowModal(true);}} style={{padding:'7px 18px',background:'#111',border:'none',color:'#fff',fontSize:'11px',fontWeight:600,fontFamily:'Sarabun'}}>ซื้อ ฿{upAvail.toLocaleString()} →</button>
-          </>)}
-        </div>)}
+    {/* Zoom controls */}
+    <div style={{ position: 'absolute', right: '16px', top: '50%', transform: 'translateY(-50%)', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
+      <button onClick={() => setZoom(z => Math.min(MAX_ZOOM, z * 1.5))} style={{ width: '32px', height: '32px', background: 'rgba(10,10,10,0.8)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '18px', borderRadius: '6px' }}>+</button>
+      <button onClick={() => setZoom(z => Math.max(MIN_ZOOM, z / 1.5))} style={{ width: '32px', height: '32px', background: 'rgba(10,10,10,0.8)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '18px', borderRadius: '6px' }}>−</button>
+    </div>
+  </div>
+
+  {/* STATS */}
+  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', background: '#111', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+    {[
+      { label: 'พิกเซลที่ขาย', value: totalSold.toLocaleString() },
+      { label: 'พิกเซลว่าง', value: (TOTAL_PIXELS - totalSold).toLocaleString() },
+      { label: 'ยอดรวม', value: `฿${totalSold.toLocaleString()}` },
+      { label: 'เต็มแล้ว', value: `${pct}%` },
+    ].map((s, i) => (
+      <div key={s.label} style={{ padding: '16px 20px', borderRight: i < 3 ? '1px solid rgba(255,255,255,0.06)' : 'none', textAlign: 'center' }}>
+        <div style={{ fontSize: '20px', fontWeight: 700, color: '#fff' }}>{s.value}</div>
+        <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.3)', letterSpacing: '2px', marginTop: '3px', fontFamily: 'Sarabun' }}>{s.label}</div>
+      </div>
+    ))}
+  </div>
+
+  {/* BOTTOM */}
+  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', maxWidth: '1400px', margin: '0 auto', background: '#0d0d0d' }}>
+    <div style={{ borderRight: '1px solid rgba(255,255,255,0.06)' }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        {[{ key: 'leaderboard', label: '🏆 ลีดเดอร์บอร์ด' }, { key: 'feed', label: '⚡ ล่าสุด' }].map(t => (
+          <button key={t.key} onClick={() => setActiveTab(t.key)} style={{ flex: 1, padding: '14px', background: 'none', border: 'none', borderBottom: activeTab === t.key ? '2px solid #fff' : '2px solid transparent', color: activeTab === t.key ? '#fff' : 'rgba(255,255,255,0.3)', fontSize: '12px', fontWeight: 600, letterSpacing: '1px', fontFamily: 'Sarabun', marginBottom: '-1px' }}>{t.label}</button>
+        ))}
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',borderBottom:'1px solid #ebebeb'}}>
-        {[{label:'พิกเซลที่ขายไปแล้ว',value:totalSold.toLocaleString()},{label:'พิกเซลที่เหลืออยู่',value:(TOTAL_PIXELS-totalSold).toLocaleString()},{label:'ยอดเงินรวม',value:`฿${totalSold.toLocaleString()}`},{label:'ขายไปแล้ว',value:`${pct}%`}].map((s,i)=>(
-          <div key={s.label} style={{padding:'20px 24px',borderRight:i<3?'1px solid #ebebeb':'none',textAlign:'center'}}>
-            <div style={{fontSize:'22px',fontWeight:700,color:'#111'}}>{s.value}</div>
-            <div style={{fontSize:'10px',color:'#aaa',letterSpacing:'2px',marginTop:'4px',fontFamily:'Sarabun'}}>{s.label}</div>
+      {activeTab === 'leaderboard' && (
+        <div>
+          {leaderboard.length === 0 ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: 'rgba(255,255,255,0.2)', fontFamily: 'Sarabun', fontSize: '13px' }}>ยังไม่มีผู้ซื้อ — เป็นคนแรกเลย! 🏆</div>
+          ) : (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1px', background: 'rgba(255,255,255,0.04)' }}>
+                {leaderboard.slice(0, 3).map((item, i) => (
+                  <div key={item.name} style={{ padding: '20px 12px', background: '#0d0d0d', textAlign: 'center', borderBottom: `2px solid ${i === 0 ? '#fff' : i === 1 ? '#888' : '#444'}` }}>
+                    <div style={{ fontSize: '20px', marginBottom: '6px' }}>{'🥇🥈🥉'[i]}</div>
+                    <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: i === 0 ? '#fff' : i === 1 ? '#666' : '#333', margin: '0 auto 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700, color: i === 0 ? '#000' : '#fff' }}>{item.name.substring(0, 2).toUpperCase()}</div>
+                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#fff', marginBottom: '3px', fontFamily: 'Sarabun' }}>{item.name}</div>
+                    <div style={{ fontSize: '14px', fontWeight: 700, color: '#fff' }}>฿{item.pixels.toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+              {leaderboard.slice(3).map((item, i) => (
+                <div key={item.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.2)', minWidth: '18px', fontWeight: 600 }}>#{i + 4}</div>
+                    <div style={{ fontSize: '13px', fontWeight: 500, color: 'rgba(255,255,255,0.7)', fontFamily: 'Sarabun' }}>{item.name}</div>
+                  </div>
+                  <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff' }}>฿{item.pixels.toLocaleString()}</div>
+                </div>
+              ))}
+            </>
+          )}
+          <div style={{ padding: '18px 20px', textAlign: 'center', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+            <button onClick={() => setMode('draw')} style={{ padding: '10px 24px', background: '#fff', border: 'none', color: '#000', fontSize: '12px', fontWeight: 700, fontFamily: 'Sarabun' }}>
+              ✏️ วาดพิกเซลเพื่อขึ้น leaderboard →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'feed' && (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#4caf50', animation: 'pulse 2s infinite' }} />
+            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.3)', letterSpacing: '3px' }}>LIVE</div>
+          </div>
+          {blocks.length === 0 ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: 'rgba(255,255,255,0.2)', fontFamily: 'Sarabun', fontSize: '13px' }}>ยังไม่มีการซื้อ</div>
+          ) : (
+            [...blocks].reverse().slice(0, 10).map((item, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{ width: '10px', height: '10px', background: item.color, flexShrink: 0 }} />
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'rgba(255,255,255,0.8)', fontFamily: 'Sarabun' }}>{item.owner}</div>
+                </div>
+                <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff' }}>฿{(item.w * item.h).toLocaleString()}</div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+
+    <div style={{ padding: '28px 24px' }}>
+      <div style={{ fontSize: '22px', fontWeight: 800, color: '#fff', lineHeight: 1.3, marginBottom: '8px', fontFamily: 'Sarabun' }}>
+        8 ล้านพิกเซล<br />พิกเซลละ <span style={{ color: '#e63946' }}>1 บาท</span>
+      </div>
+      <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)', lineHeight: 1.8, marginBottom: '28px', fontFamily: 'Sarabun', fontWeight: 300 }}>
+        เมื่อขายครบ — บิลบอร์ดนี้จะขึ้นจริง<br />ใจกลางกรุงเทพมหานคร
+      </div>
+
+      <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '20px', marginBottom: '20px' }}>
+        <div style={{ fontSize: '9px', fontWeight: 600, letterSpacing: '3px', color: 'rgba(255,255,255,0.2)', marginBottom: '14px' }}>วิธีซื้อพิกเซล</div>
+        {[
+          { n: '01', t: 'กด "เริ่มวาด"', d: 'กดปุ่มด้านบนขวา แล้ว zoom เข้าไปในพื้นที่ว่าง' },
+          { n: '02', t: 'วาดด้วยนิ้ว', d: 'วาดรูป ชื่อ หรือโลโก้ของคุณลงบน billboard' },
+          { n: '03', t: 'กดซื้อ', d: 'ระบบคำนวณราคาให้อัตโนมัติ ฿1/พิกเซล' },
+          { n: '04', t: 'โอนเงิน', d: 'โอน Bank Transfer แล้วส่งสลิปมาที่ LINE' },
+        ].map(s => (
+          <div key={s.n} style={{ display: 'flex', gap: '14px', marginBottom: '14px' }}>
+            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.2)', fontWeight: 600, minWidth: '22px', marginTop: '2px' }}>{s.n}</div>
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#fff', marginBottom: '2px', fontFamily: 'Sarabun' }}>{s.t}</div>
+              <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', lineHeight: '1.5', fontFamily: 'Sarabun' }}>{s.d}</div>
+            </div>
           </div>
         ))}
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1.4fr 1fr',maxWidth:'1400px',margin:'0 auto'}}>
-        <div style={{borderRight:'1px solid #ebebeb'}}>
-          <div style={{display:'flex',borderBottom:'1px solid #ebebeb'}}>
-            {[{key:'leaderboard',label:'🏆 ลีดเดอร์บอร์ด'},{key:'feed',label:'⚡ ล่าสุด'}].map(t=>(
-              <button key={t.key} onClick={()=>setActiveTab(t.key)} style={{flex:1,padding:'16px',background:'none',border:'none',borderBottom:activeTab===t.key?'2px solid #111':'2px solid transparent',color:activeTab===t.key?'#111':'#aaa',fontSize:'12px',fontWeight:600,letterSpacing:'1px',fontFamily:'Sarabun',marginBottom:'-1px'}}>{t.label}</button>
-            ))}
+      <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '20px' }}>
+        <div style={{ fontSize: '9px', fontWeight: 600, letterSpacing: '3px', color: 'rgba(255,255,255,0.2)', marginBottom: '10px' }}>ราคา</div>
+        {[
+          { px: '1,000', label: 'เล็ก' },
+          { px: '10,000', label: 'กลาง' },
+          { px: '100,000', label: 'ใหญ่' },
+          { px: '1,000,000', label: 'ยักษ์ 👑' },
+        ].map(p => (
+          <div key={p.px} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+            <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', fontFamily: 'Sarabun' }}>{p.px} px <span style={{ color: 'rgba(255,255,255,0.2)' }}>· {p.label}</span></div>
+            <div style={{ fontSize: '12px', fontWeight: 700, color: '#fff' }}>฿{p.px}</div>
           </div>
-          {activeTab==='leaderboard'&&(<div>
-            {leaderboard.length===0?(<div style={{padding:'40px',textAlign:'center',color:'#ccc',fontFamily:'Sarabun',fontSize:'13px'}}>ยังไม่มีผู้ซื้อ — เป็นคนแรกเลย! 🏆</div>):(<>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'1px',background:'#ebebeb'}}>
-                {leaderboard.slice(0,3).map((item,i)=>(
-                  <div key={item.name} style={{padding:'24px 16px',background:'#fff',textAlign:'center',borderBottom:`3px solid ${i===0?'#111':i===1?'#888':'#bbb'}`}}>
-                    <div style={{fontSize:'22px',marginBottom:'8px'}}>{'🥇🥈🥉'[i]}</div>
-                    <div style={{width:'36px',height:'36px',borderRadius:'50%',background:i===0?'#111':i===1?'#666':'#aaa',margin:'0 auto 8px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:700,color:'#fff'}}>{item.name.substring(0,2).toUpperCase()}</div>
-                    <div style={{fontSize:'12px',fontWeight:700,color:'#111',marginBottom:'4px',fontFamily:'Sarabun'}}>{item.name}</div>
-                    <div style={{fontSize:'16px',fontWeight:700,color:'#111'}}>฿{item.pixels.toLocaleString()}</div>
-                    <div style={{fontSize:'9px',color:'#bbb',marginTop:'2px',fontFamily:'Sarabun'}}>{item.pixels.toLocaleString()} พิกเซล</div>
-                  </div>
-                ))}
-              </div>
-              {leaderboard.slice(3).map((item,i)=>(
-                <div key={item.name} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 24px',borderBottom:'1px solid #f5f5f5'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:'14px'}}>
-                    <div style={{fontSize:'12px',color:'#ccc',minWidth:'20px',fontWeight:600}}>#{i+4}</div>
-                    <div style={{fontSize:'13px',fontWeight:500,color:'#333',fontFamily:'Sarabun'}}>{item.name}</div>
-                  </div>
-                  <div style={{textAlign:'right'}}>
-                    <div style={{fontSize:'13px',fontWeight:700,color:'#111'}}>฿{item.pixels.toLocaleString()}</div>
-                    <div style={{fontSize:'9px',color:'#ccc'}}>{item.pixels.toLocaleString()} px</div>
-                  </div>
-                </div>
-              ))}
-            </>)}
-            <div style={{padding:'20px 24px',textAlign:'center',borderTop:'1px solid #f5f5f5'}}>
-              <button onClick={()=>setShowModal(true)} style={{padding:'10px 24px',background:'#111',border:'none',color:'#fff',fontSize:'12px',fontWeight:600,fontFamily:'Sarabun'}}>ซื้อพิกเซลเพื่อขึ้น leaderboard →</button>
-            </div>
-          </div>)}
-          {activeTab==='feed'&&(<div>
-            <div style={{display:'flex',alignItems:'center',gap:'8px',padding:'16px 24px',borderBottom:'1px solid #f5f5f5'}}>
-              <div style={{width:'6px',height:'6px',borderRadius:'50%',background:'#111',animation:'pulse 2s infinite'}}/>
-              <div style={{fontSize:'10px',color:'#aaa',letterSpacing:'3px'}}>LIVE</div>
-            </div>
-            {blocks.length===0?(<div style={{padding:'40px',textAlign:'center',color:'#ccc',fontFamily:'Sarabun',fontSize:'13px'}}>ยังไม่มีการซื้อ</div>):(
-              [...blocks].reverse().slice(0,10).map((item,i)=>(
-                <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 24px',borderBottom:'1px solid #f5f5f5'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-                    <div style={{width:'10px',height:'10px',background:item.color,flexShrink:0}}/>
-                    <div style={{fontSize:'13px',fontWeight:600,color:'#111',fontFamily:'Sarabun'}}>{item.owner}</div>
-                  </div>
-                  <div style={{fontSize:'13px',fontWeight:700,color:'#111'}}>฿{(item.w*item.h).toLocaleString()}</div>
-                </div>
-              ))
-            )}
-          </div>)}
+        ))}
+      </div>
+    </div>
+  </div>
+
+  {/* TOAST */}
+  {toast && (
+    <div style={{ position: 'fixed', bottom: '28px', left: '50%', background: '#fff', padding: '12px 24px', fontSize: '13px', color: '#000', zIndex: 2000, animation: 'fadeUp 0.3s ease', whiteSpace: 'nowrap', fontFamily: 'Sarabun', fontWeight: 600 }}>
+      {toast}
+    </div>
+  )}
+
+  {/* MODAL */}
+  {showModal && (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(8px)' }}>
+      <div style={{ background: '#111', border: '1px solid rgba(255,255,255,0.1)', padding: '36px', width: '420px', maxWidth: '92vw' }}>
+        <div style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '4px', letterSpacing: '1px' }}>จองพิกเซลของคุณ</div>
+        <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginBottom: '28px', fontFamily: 'Sarabun' }}>
+          {pendingPrice.toLocaleString()} พิกเซล · ถาวรตลอดไป · ขึ้น Leaderboard
         </div>
 
-        <div style={{padding:'32px'}}>
-          <div style={{fontSize:'13px',color:'#aaa',lineHeight:'2',marginBottom:'32px',fontFamily:'Sarabun',fontWeight:300}}>
-            "นี่คือบิลบอร์ด คุณสามารถทิ้งร่องรอยของคุณได้ในราคาเพียง <span style={{color:'#111',fontWeight:700}}>฿1 ต่อพิกเซล</span> เมื่อขายครบ — ผมจะเอาบิลบอร์ดนี้ไปตั้งกลางกรุงเทพมหานคร"
+        <div style={{ marginBottom: '16px' }}>
+          <label style={{ display: 'block', fontSize: '9px', fontWeight: 600, color: 'rgba(255,255,255,0.3)', letterSpacing: '2px', marginBottom: '6px' }}>ชื่อ / แบรนด์</label>
+          <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="นิรนาม" style={{ width: '100%', padding: '11px 14px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontFamily: 'Sarabun', fontSize: '14px', outline: 'none' }} />
+        </div>
+
+        <div style={{ padding: '14px 18px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <div>
+            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.3)', letterSpacing: '3px', marginBottom: '4px' }}>ยอดที่ต้องโอน</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#fff' }}>฿{pendingPrice.toLocaleString()}</div>
           </div>
-          <div style={{borderTop:'1px solid #ebebeb',paddingTop:'24px',marginBottom:'24px'}}>
-            <div style={{fontSize:'10px',fontWeight:600,letterSpacing:'3px',color:'#aaa',marginBottom:'16px'}}>วิธีซื้อพิกเซล</div>
-            {[{n:'01',t:'เลือกโหมด',d:'วาดเองทีละพิกเซล หรืออัปโหลดโลโก้ของคุณ'},{n:'02',t:'วางบน Billboard',d:'ลากและเลือกพื้นที่ที่คุณต้องการ'},{n:'03',t:'โอนเงิน',d:'โอนผ่าน Bank Transfer แล้วส่งสลิปมาที่ LINE'},{n:'04',t:'ติดบิลบอร์ดตลอดไป',d:'ชื่อคุณขึ้น Leaderboard และอยู่บนบิลบอร์ดถาวร'}].map(s=>(
-              <div key={s.n} style={{display:'flex',gap:'16px',marginBottom:'16px'}}>
-                <div style={{fontSize:'10px',color:'#ccc',fontWeight:600,minWidth:'24px',marginTop:'2px'}}>{s.n}</div>
-                <div>
-                  <div style={{fontSize:'13px',fontWeight:600,color:'#111',marginBottom:'3px',fontFamily:'Sarabun'}}>{s.t}</div>
-                  <div style={{fontSize:'11px',color:'#aaa',lineHeight:'1.6',fontFamily:'Sarabun'}}>{s.d}</div>
-                </div>
-              </div>
-            ))}
+          <div style={{ textAlign: 'right', fontSize: '10px', color: 'rgba(255,255,255,0.2)', lineHeight: '1.8', fontFamily: 'Sarabun' }}>
+            <div>{pendingPrice.toLocaleString()} พิกเซล</div>
+            <div>@ ฿1/พิกเซล</div>
+            <div style={{ color: '#fff', fontWeight: 600, marginTop: '4px' }}>+ ขึ้น Leaderboard 🏆</div>
           </div>
-          <div style={{borderTop:'1px solid #ebebeb',paddingTop:'24px'}}>
-            <div style={{fontSize:'10px',fontWeight:600,letterSpacing:'3px',color:'#aaa',marginBottom:'12px'}}>ราคา</div>
-            {[{px:'1,000',label:'เล็ก'},{px:'10,000',label:'กลาง'},{px:'100,000',label:'ใหญ่'},{px:'1,000,000',label:'ยักษ์ 👑'}].map(p=>(
-              <div key={p.px} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid #f5f5f5'}}>
-                <div style={{fontSize:'12px',color:'#555',fontFamily:'Sarabun'}}>{p.px} พิกเซล <span style={{color:'#bbb'}}>· {p.label}</span></div>
-                <div style={{fontSize:'12px',fontWeight:700,color:'#111'}}>฿{p.px}</div>
-              </div>
-            ))}
-          </div>
+        </div>
+
+        <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', fontSize: '11px', color: 'rgba(255,255,255,0.4)', lineHeight: '1.8', marginBottom: '20px', fontFamily: 'Sarabun' }}>
+          📱 โอนเงินมาที่บัญชี<br />
+          ธนาคาร: <strong style={{ color: '#fff' }}>ธนาคารไทยพาณิชย์</strong><br />
+          ชื่อบัญชี: <strong style={{ color: '#fff' }}>นายต้นกล้า ไปเยอซ์</strong><br />
+          เลขบัญชี: <strong style={{ color: '#fff' }}>936-240-5487</strong><br />
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button onClick={() => setShowModal(false)} style={{ flex: 1, padding: '13px', background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.3)', fontSize: '12px', fontFamily: 'Sarabun' }}>ยกเลิก</button>
+          <button onClick={handleBuy} style={{ flex: 2, padding: '13px', background: '#fff', border: 'none', color: '#000', fontSize: '13px', fontWeight: 700, fontFamily: 'Sarabun' }}>
+            ยืนยัน + ส่งสลิป →
+          </button>
         </div>
       </div>
-
-      {toast&&(<div style={{position:'fixed',bottom:'28px',left:'50%',background:'#111',padding:'12px 24px',fontSize:'13px',color:'#fff',zIndex:2000,animation:'fadeUp 0.3s ease',whiteSpace:'nowrap',fontFamily:'Sarabun'}}>{toast}</div>)}
-
-      {showModal&&(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,backdropFilter:'blur(4px)'}}>
-        <div style={{background:'#fff',padding:'40px',width:'420px',maxWidth:'92vw',boxShadow:'0 20px 60px rgba(0,0,0,0.15)'}}>
-          <div style={{fontSize:'16px',fontWeight:700,color:'#111',marginBottom:'4px',letterSpacing:'1px'}}>จองพิกเซลของคุณ</div>
-          <div style={{fontSize:'11px',color:'#aaa',marginBottom:'28px',fontFamily:'Sarabun'}}>{pendingPrice.toLocaleString()} พิกเซล · ถาวรตลอดไป · ขึ้น Leaderboard</div>
-          <div style={{marginBottom:'16px'}}>
-            <label style={{display:'block',fontSize:'10px',fontWeight:600,color:'#aaa',letterSpacing:'2px',marginBottom:'6px'}}>ชื่อ / แบรนด์</label>
-            <input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="นิรนาม" style={inp}/>
-          </div>
-          <div style={{padding:'16px',background:'#f8f8f8',border:'1px solid #ebebeb',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-            <div>
-              <div style={{fontSize:'9px',color:'#aaa',letterSpacing:'3px',marginBottom:'4px'}}>ยอดที่ต้องโอน</div>
-              <div style={{fontSize:'28px',fontWeight:700,color:'#111'}}>฿{pendingPrice.toLocaleString()}</div>
-            </div>
-            <div style={{textAlign:'right',fontSize:'10px',color:'#bbb',lineHeight:'1.8',fontFamily:'Sarabun'}}>
-              <div>{pendingPrice.toLocaleString()} พิกเซล</div>
-              <div>@ ฿1/พิกเซล</div>
-              <div style={{color:'#111',fontWeight:600,marginTop:'4px'}}>+ ขึ้น Leaderboard 🏆</div>
-            </div>
-          </div>
-          <div style={{background:'#f8f8f8',padding:'14px',fontSize:'11px',color:'#888',lineHeight:'1.8',marginBottom:'20px',fontFamily:'Sarabun'}}>
-            📱 โอนเงินมาที่บัญชี<br/>
-            ธนาคาร: <strong style={{color:'#111'}}>ใส่ชื่อธนาคารของคุณ</strong><br/>
-            ชื่อบัญชี: <strong style={{color:'#111'}}>ใส่ชื่อบัญชีของคุณ</strong><br/>
-            เลขบัญชี: <strong style={{color:'#111'}}>ใส่เลขบัญชีของคุณ</strong><br/>
-            ส่งสลิปมาที่ LINE: <strong style={{color:'#111'}}>@8milbillboard</strong>
-          </div>
-          <div style={{display:'flex',gap:'10px'}}>
-            <button onClick={()=>setShowModal(false)} style={{flex:1,padding:'13px',background:'none',border:'1px solid #ddd',color:'#aaa',fontSize:'12px',fontFamily:'Sarabun'}}>ยกเลิก</button>
-            <button onClick={handleBuy} style={{flex:2,padding:'13px',background:'#111',border:'none',color:'#fff',fontSize:'13px',fontWeight:700,fontFamily:'Sarabun'}}>ยืนยัน + ส่งสลิป →</button>
-          </div>
-        </div>
-      </div>)}
     </div>
-  );
+  )}
+</div>
+```
+
+);
 }
