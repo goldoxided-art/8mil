@@ -250,9 +250,9 @@ return () => supabase.removeChannel(channel); }, []);
  };
  const pendingPrice = drawnPixels.length;
  return (
- <div style={{ background: "#0a0a0a", minHeight: "100vh", color: "#fff", fontFamily: "Inte <style>{`
- @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700; * { box-sizing: border-box; margin: 0; padding: 0; }
- button { cursor: pointer; transition: all 0.15s; }
+ <div style={{ background: "#0a0a0a", minHeight: "100vh", color: "#fff", fontFamily: "Inter, system-ui, sans-serif", overflow: "hidden" }}>
+<style>{CSS}</style>
+button { cursor: pointer; transition: all 0.15s; }
  button:hover { opacity: 0.8; }
  @keyframes fadeUp { from { opacity:0; transform:translateY(6px) translateX(-50%); } t @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
