@@ -31,7 +31,7 @@ export default function App() {
  useEffect(() => {
  loadPixels();
  const channel = supabase.channel("pixels")
- .on("postgres_changes", { event: "INSERT", schema: "public", table: "pixels" }, payload setBlocks(prev => [...prev, payload.new]);
+.on("postgres_changes", { event: "INSERT", schema: "public", table: "pixels" }, payload => {
  }).subscribe();
 return () => supabase.removeChannel(channel); }, []);
  const loadPixels = async () => {
