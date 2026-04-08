@@ -33,8 +33,7 @@ export default function App() {
  const channel = supabase.channel("pixels")
  .on("postgres_changes", { event: "INSERT", schema: "public", table: "pixels" }, payload setBlocks(prev => [...prev, payload.new]);
  }).subscribe();
- return () => supabase.removeChannel(channel);
- }, []);
+return () => supabase.removeChannel(channel); }, []);
  const loadPixels = async () => {
  setLoading(true);
  const { data } = await supabase.from("pixels").select("*");
